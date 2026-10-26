@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>09 Shader · arp 引擎教程</title>
+<link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+<div class="layout">
+<aside class="sidebar">
+  <div class="brand">arp 引擎教程<small>Anime Render Pipeline</small></div>
+  <nav>
+    <div class="group-title">导航</div>
+    <a class="nav" href="index.html"><span class="num">·</span>总览</a>
+    <div class="group-title">系统文档</div>
+    <a class="nav" href="01-render-pipeline.html"><span class="num">01</span>渲染管线</a>
+    <a class="nav" href="02-gameobject-component.html"><span class="num">02</span>GameObject + Component</a>
+    <a class="nav" href="03-animation.html"><span class="num">03</span>动画</a>
+    <a class="nav" href="04-particles.html"><span class="num">04</span>粒子</a>
+    <a class="nav" href="05-ui.html"><span class="num">05</span>UI</a>
+    <a class="nav" href="06-resource-management.html"><span class="num">06</span>资源管理</a>
+    <a class="nav" href="07-reflection.html"><span class="num">07</span>反射</a>
+    <a class="nav" href="08-network.html"><span class="num">08</span>网络</a>
+    <a class="nav active" href="09-shader.html"><span class="num">09</span>Shader</a>
+    <a class="nav" href="10-prefab-internal-resources.html"><span class="num">10</span>预制体</a>
+    <a class="nav" href="11-art-asset-formats.html"><span class="num">11</span>资产导入</a>
+    <a class="nav" href="12-procedural-generation.html"><span class="num">12</span>程序化生成</a>
+    <a class="nav" href="13-scripting.html"><span class="num">13</span>脚本</a>
+  </nav>
+</aside>
+
+<main class="content">
+  <h1>09 Shader <span class="badge blue">Prototype Complete</span></h1>
+  <p class="lead">arp 以 Slang 作为 shader 权威源码，离线生成 SPIR-V、MSL、WGSL 与 YAML reflection。本文介绍 shader 工件链路，以及 C++ row-major 矩阵存储与 Slang 矩阵 ABI 的硬约束。具体 shader/backend 能力和验证状态以 <a href="../RHI_CAPABILITY_MATRIX.md">RHI 能力矩阵</a>为准。</p>
+
+  <h2>1. Shader：Slang 统一着色语言与多后端编译</h2>
+  <p>shader 编译器与工件 contract 位于 <code>src/shader</code>。普通目标包括 <strong>SPIR-V / MSL / WGSL</strong>；WebGL1 另有 Slang 派生 GLSL ES 1.00 工件，只能在显式 opt-in 的 WebGL Prototype 工具链中使用，不意味着共享生产 shader/backend 能力。</p>
+
+  <div class="diagram">
+    <svg viewBox="0 0 680 268" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Shader 编译与反射闭环">
+      <defs>
+        <marker id="s6arr" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#5268b8"/></marker>
+        <marker id="s6arrd" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#64748b"/></marker>
+      </defs>
+      <style>
+        .box { fill:#eef3fa; stroke:#5268b8; stroke-width:1.5; rx:8; }
+        .boxg { fill:#e6f4f1; stroke:#2f8a7b; stroke-width:1.5; rx:8; }
+        .boxt { fill:#faedf7; stroke:#b34e94; stroke-width:1.5; rx:8; }
+        .t { fill:#1e2430; font:13px 'Segoe UI',Arial,sans-serif; text-anchor:middle; }
+        .ts { fill:#5b6b82; font:11px 'Segoe UI',Arial,sans-serif; text-anchor:middle; }
+        .lbl { fill:#5b6b82; font:11px 'Segoe UI',Arial,sans-serif; text-anchor:middle; }
+      </style>
+      <rect class="box" x="270" y="14" width="140" height="40"/><text class="t" x="340" y="33">*.slang 源</text><text class="ts" x="340" y="47">统一着色语言</text>
+      <rect class="boxt" x="262" y="78" width="156" height="40"/><text class="t" x="340" y="97">slangc 编译</text><text class="ts" x="340" y="111">scripts/compile_shaders.py</text>
+      <rect class="boxg" x="34" y="150" width="118" height="40"/><text class="t" x="93" y="169">SPIR-V</text><text class="ts" x="93" y="183">spirv_1_5</text>
+      <rect class="boxg" x="204" y="150" width="118" height="40"/><text class="t" x="263" y="169">Metal</text><text class="ts" x="263" y="183">sm_6_0</text>
+      <rect class="boxg" x="374" y="150" width="118" height="40"/><text class="t" x="433" y="169">WGSL</text><text class="ts" x="433" y="183">sm_6_0 + 后处理</text>
+      <rect class="box" x="540" y="78" width="138" height="40"/><text class="t" x="609" y="97">*.reflection.yaml</text><text class="ts" x="609" y="111">SPIRV-Reflect metadata</text>
+      <rect class="box" x="540" y="150" width="138" height="40"/><text class="t" x="609" y="169">ShaderReflectionCache</text><text class="ts" x="609" y="183">loadFromYaml</text>
+      <rect class="boxt" x="540" y="214" width="138" height="40"/><text class="t" x="609" y="233">ShaderPipeline</text><text class="t" x="609" y="247">ReflectionValidator</text>
+      <path d="M340,54 L340,76" stroke="#5268b8" stroke-width="2" marker-end="url(#s6arr)"/>
+      <path d="M300,118 L120,148" stroke="#64748b" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#s6arrd)"/>
+      <path d="M320,118 L263,148" stroke="#64748b" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#s6arrd)"/>
+      <path d="M360,118 L433,148" stroke="#64748b" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#s6arrd)"/>
+      <path d="M420,98 L540,98" stroke="#5268b8" stroke-width="2" marker-end="url(#s6arr)"/>
+      <path d="M609,118 L609,148" stroke="#5268b8" stroke-width="2" marker-end="url(#s6arr)"/>
+      <path d="M609,190 L609,212" stroke="#b34e94" stroke-width="2" marker-end="url(#s6arr)"/>
+      <text class="lbl" x="490" y="92">生成</text>
+      <text class="lbl" x="300" y="138">三目标扇出</text>
+    </svg>
+  </div>
+
+  <h3>1.1 后端无关的统一编译 API</h3>
+  <p><code>src/shader/shader_compiler.h</code> 暴露了与 RHI 同源的「上层只声明、后端内部分支」契约。<code>ShaderCompiler::compile()</code> 接受一份请求、返回字节码 + 反射数据，全程不暴露任何原生 API：</p>
+  <table>
+    <thead><tr><th>枚举 / 结构</th><th>含义</th></tr></thead>
+    <tbody>
+      <tr><td><code>ShaderStage</code></td><td><code>Vertex</code> / <code>Fragment</code> / <code>Compute</code> 三个阶段</td></tr>
+      <tr><td><code>TargetBackend</code></td><td><code>SpirV</code> / <code>Msl</code> / <code>Wgsl</code> 三个通用离线目标</td></tr>
+      <tr><td><code>BindingType</code></td><td><code>UniformBuffer</code> / <code>StorageBuffer</code> / <code>SampledTexture</code> / <code>StorageTexture</code> / <code>Sampler</code></td></tr>
+      <tr><td><code>VertexAttributeFormat</code></td><td><code>Float2</code> / <code>Float3</code> / <code>Float4</code>（顶点属性位宽）</td></tr>
+      <tr><td><code>ShaderCompileRequest</code></td><td><code>sourcePath</code> / <code>sourceCode</code> / <code>moduleName</code> / <code>target</code> / <code>entryPoints</code></td></tr>
+      <tr><td><code>ShaderCompileResult</code></td><td><code>success</code> / <code>diagnostics</code> / <code>bytecode</code> / <code>bindings</code> / <code>reflection</code></td></tr>
+      <tr><td><code>ShaderReflection</code></td><td><code>entryPoints</code> / <code>bindings</code> / <code>vertexAttributes</code> / <code>pushConstantSizeBytes</code></td></tr>
+    </tbody>
+  </table>
+
+  <pre class="code"><code>// 一次编译：从 Slang 源码到某一后端的字节码 + 反射
+arp::shader::ShaderCompileRequest req;
+req.sourceCode  = readFile("shaders/wocc/particles.slang");
+req.moduleName  = "Particles";
+req.target      = arp::shader::TargetBackend::SpirV;
+req.entryPoints = {{"vertexMain", arp::shader::ShaderStage::Vertex},
+                   {"fragmentMain", arp::shader::ShaderStage::Fragment}};
+
+arp::shader::ShaderCompileResult res = arp::shader::ShaderCompiler{}.compile(req);
+if (res.success) {
+    uploadToGpu(res.bytecode);                       // 交 RHI 创建 ShaderModule
+    validatePipelineAgainst(res.reflection);         // 见第 2 章校验
+}</code></pre>
+
+  <h3>1.2 编译流水线：scripts/compile_shaders.py</h3>
+  <p>项目 shader 工件由 Slang 离线构建生成；构建会调用 <code>scripts/compile_shaders.py</code>，并在具备依赖时用 SPIRV-Reflect 生成权威的 <code>.reflection.yaml</code>。直接执行工具时显式指定 Slang 编译器：</p>
+  <pre class="code"><code>python scripts/compile_shaders.py --slangc "C:/VulkanSDK/1.4.350.0/Bin/slangc.exe"
+
+# 完整引擎构建也会构建选定 preset 的 shader 工件
+python scripts/build.py --preset win-vulkan-debug shaders</code></pre>
+  <p>生成流程固定使用 <code>-matrix-layout-row-major</code>，并对 WGSL 执行受 contract/test 约束的目标适配；不支持的接口/语义必须给出诊断，不能通过猜测绑定或静默修补产出生产工件。</p>
+  <p>WGSL 适配包含按明确 metadata 处理绑定、entry-point IO 与 storage texture format/access。最终工件与 reflection contract 是运行时加载和 pipeline validation 的事实源。</p>
+  <ul>
+    <li><code>set_wgsl_push_constant_binding()</code>：依据 push-constant contract 生成 WGSL uniform binding。</li>
+    <li><code>set_wgsl_vertex_output_locations()</code>：为顶点输出字段生成 location。</li>
+    <li><code>set_wgsl_storage_texture_format_and_access()</code>：依据 metadata 设置 storage texture format/access。</li>
+  </ul>
+  <div class="callout">
+    <p><strong>反射 YAML 如何产生：</strong>离线流程读取生成的 SPIR-V 及 SPIRV-Reflect 输出，并与受版本控制的 shader/entry-point metadata 结合，生成 <code>.reflection.yaml</code>。运行时用 <code>ShaderReflectionCache</code> 加载 YAML；缺失、冲突或无法确定的 reflection 必须失败关闭。</p>
+  </div>
+
+  <h3>1.3 反射缓存与 Pipeline 校验</h3>
+  <p>编译产物不只是字节码。反射数据以 YAML 工件保存，运行时通过反射缓存和校验器，把「着色器实际签名」与「上层声明的管线布局」对齐：</p>
+  <table>
+    <thead><tr><th>类型</th><th>职责</th></tr></thead>
+    <tbody>
+      <tr><td><code>ShaderReflectionCache</code></td><td>从 YAML 加载 <code>ShaderReflectionModule</code>（<code>loadFromYaml</code> / <code>loadFromFile</code>），校验版本化反射契约</td></tr>
+      <tr><td><code>ShaderPipelineReflectionValidator</code></td><td><code>validate(ShaderPipelineLayoutDesc, ShaderReflection)</code> 校验 push-constant 尺寸、顶点属性与着色器反射一致，返回 <code>ShaderPipelineValidationResult</code></td></tr>
+    </tbody>
+  </table>
+  <pre class="code"><code>// 校验：上层声明的管线布局必须匹配着色器真实反射
+arp::shader::ShaderPipelineLayoutDesc layout;
+layout.pushConstantSizeBytes = sizeof(PbrPushConstants);
+layout.vertexAttributes      = { {"position","POSITION",Float3,0}, {"normal","NORMAL",Float3,1} };
+
+auto mod = arp::shader::ShaderReflectionCache::loadFromFile("pbr_scene.reflection.yaml").module;
+arp::shader::ShaderPipelineValidationResult v =
+    arp::shader::ShaderPipelineReflectionValidator::validate(layout, mod.reflection);
+assert(v.success);   // 不一致会在编译期/加载期被确定性捕获，而非 GPU 报错</code></pre>
+
+  <h3>1.4 当前 shader 工件</h3>
+  <p>shader 模块由 CMake 和 Slang 工具链按 entry point 构建。以下是仓库当前维护的代表性工件：</p>
+  <table>
+    <thead><tr><th>模块</th><th>源</th><th>作用</th></tr></thead>
+    <tbody>
+      <tr><td>粒子场景</td><td><code>shaders/wocc/particles.slang</code></td><td>粒子绘制 shader；C++ push-constant 镜像与生成反射由 shader contract test 核对</td></tr>
+      <tr><td>Queen 场景</td><td><code>shaders/examples/build_a_queen.slang</code></td><td>Build a Queen 场景着色器；具体目标工件依所选构建 profile 而定</td></tr>
+      <tr><td>WebGL1 fixture</td><td><code>tests/fixtures/webgl1_graphics.slang</code></td><td>显式 opt-in Prototype 工具链的 GLSL ES 1.00 输入，不代表通用生产目标</td></tr>
+    </tbody>
+  </table>
+  <p>要新增 shader，应把 Slang 源和明确 entry-point/资源 metadata 接入现有 CMake 与编译工具链，再生成目标字节码与 YAML reflection，并补足 shader contract tests。运行时通过反射与 pipeline contract 校验后才允许创建资源；不要把 WebGL1 专用 GLSL ES 100 工件误当作通用生产目标。</p>
+
+  <h2>2. Shader ABI：CPU 结构体 ↔ GPU uniform/cbuffer</h2>
+  <p>多目标编译仍要求 shader 声明的 buffer ABI 与 CPU 上传字节逐项一致：字段偏移、数组 stride、矩阵布局和 push-constant 尺寸都必须有反射或 contract-test 证据。不能仅凭“多后端同一份源码”推断各目标 ABI 自动一致。</p>
+
+  <h3>2.1 为什么需要 ABI contract</h3>
+  <ul>
+    <li>渲染时你常把一小块 CPU 内存（如每帧的 view-projection、材质参数）通过 <strong>push constant</strong> 或 <strong>uniform buffer</strong> 推给 GPU。</li>
+    <li>GPU 侧结构体布局（成员偏移、对齐、大小）由着色器源码定义；CPU 侧的 C++ 镜像结构体必须与之逐字节一致，否则 GPU 读到错位字段 → 画面错乱，或 RHI/校验器直接拒绝。</li>
+    <li>共享 profile 使用同一 Slang 源和有版本的反射/lowering contract；WebGL1 是单独的 Prototype shader artifact/profile，不能据此推断四后端一致性。</li>
+  </ul>
+
+  <h3>2.2 CPU 与 shader buffer layout</h3>
+  <p>buffer 的字段偏移、大小、数组 stride 和矩阵布局必须由 Slang 源、反射 metadata 与生成工件共同确定。不要把通用图形 API 的布局经验当作 arp ABI；以生成 reflection 和 contract test 为准。</p>
+  <div class="callout note">
+    <p><strong>工程结论：</strong>不要用通用对齐口诀推导实际偏移或 size。对每个目标，以生成 reflection、Slang 目标工件与 C++ 镜像的契约测试为准；差异必须由显式 ABI metadata 和测试解释。</p>
+  </div>
+
+  <h3>2.3 实战：引擎内真实 push-constant 结构体的字节核算</h3>
+  <p>粒子系统展示了为什么要把 CPU payload、Slang 字段和 reflection size 分别核对，而不能混为一个数字：</p>
+  <table>
+    <thead><tr><th>表示</th><th>字段构成</th><th>字节数</th><th>依据</th></tr></thead>
+    <tbody>
+      <tr><td>C++ <code>ParticlePushConstants</code></td><td><code>float[16]</code> + 六个 uint32、两个 float 与四个 float 的显式尾部空间</td><td><code>sizeof</code> = 112</td><td><code>src/renderer/particles/particle_draw_plan.h</code></td></tr>
+      <tr><td>Slang reflection</td><td>矩阵、六个 uint、两个 float 与一个 <code>pad3</code> float</td><td><code>pushConstantSizeBytes</code> = 100</td><td><code>tests/contract/shader_tests.cpp</code> 断言反射 size；使用时必须核对具体 target package/binding contract</td></tr>
+      <tr><td><code>TrailBeamPushConstants</code></td><td><code>float[16]</code> + 两个 uint32 与两个 float</td><td>80</td><td>以 C++ 结构定义及对应 Slang/reflection contract 为准</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout note">
+    <p><strong>Matrix Layout：</strong>C++ <code>core::Mat4</code> 使用 row-major 字节；Slang 保持默认 <code>float4x4</code> 声明，所有离线目标显式启用 <code>-matrix-layout-row-major</code>。不得在 shader 字段写 <code>row_major</code> 或 <code>column_major</code> 来猜测 native ABI。push-constant struct 内也不要放 <code>//</code> 注释，以免当前反射 size parser 将注释吸收进字段 token。</p>
+  </div>
+
+  <h3>2.4 L2 push-constant 上限</h3>
+  <p>arp 的 L2 contract 将单次 atomic push-constant payload 上限定义为 <strong>256 字节</strong>。这是跨后端的引擎契约，不是 Vulkan 设备固定上限；每个 backend/profile 仍需满足自己的 capability、reflection、payload 与预算 gate。</p>
+  <div class="callout warn">
+    <p><strong>越界的真实后果：</strong></p>
+    <ul>
+      <li>尺寸不得超过 L2 上限；创建管线、lowering 或录制阶段任何 gate 不满足都必须确定性失败。</li>
+      <li>新增数据应按真实字段 ABI 设计；能否改用 uniform buffer 取决于目标 backend 的已验证 lowering，而不是静默替代。</li>
+    </ul>
+  </div>
+  <div class="callout">
+    <p><strong>失败关闭：</strong>帧计划阶段会拒绝 <code>pushConstantSizeBytes &gt; 256</code>；具体 backend 还会校验 lowering 能力、管线容量和反射绑定，不允许通过占位或未声明模拟继续执行。</p>
+  </div>
+
+  <h3>2.5 Push-constant 校验边界</h3>
+  <p>布局和命令错误应尽早确定性拒绝，但每项校验覆盖的边界不同：</p>
+  <ul>
+    <li><strong>防线一 · PipelineLayout 校验（创建管线前）。</strong>RHI（L2）在创建管线前校验 push-constant 布局：同一 shader stage 的 byte range 重叠 → 确定性失败；<code>offset + size</code> 回绕溢出 → 确定性失败。同时 <code>ShaderPipelineReflectionValidator::validate(ShaderPipelineLayoutDesc, ShaderReflection)</code> 用反射里的 <code>pushConstantSizeBytes</code> 校验你声明的尺寸与顶点属性是否和着色器真实签名一致。</li>
+    <li><strong>防线二 · 命令期 push-constant 校验（录制时）。</strong>Null 后端在 pass 内录制 <code>pushConstants()</code> 时校验：必须先绑管线再 push（pipeline-before-push）、shader stage 必须在管线声明范围内、更新非空且 range 覆盖完整、<code>offset + size</code> 不溢出；任一不满足则不在 pass 内录制任何命令——把后端专属规则挡在 L2 之下，给上层确定性失败而非原生 UB。</li>
+  </ul>
+  <div class="callout note">
+    <p>这些检查降低了已覆盖路径中的错配风险，不代表所有 shader/backend 自动一致。每个消费该 payload 的 target 仍需通过对应 reflection、lowering 和执行 contract。</p>
+  </div>
+
+  <h3>2.6 动态 uniform 偏移对齐</h3>
+  <p>若使用 <strong>uniform buffer</strong> 动态偏移，偏移必须满足目标 device/runtime 查询到的 <code>uniformBufferOffsetAlignment</code>。WebGPU profile 从浏览器设备 probe 读取该限制；缺失或非法时会失败关闭，不得硬编码为跨设备常量。</p>
+  <p>暂存上传和纹理行距也各有独立的 backend/API 对齐契约，按资源请求与 native limit 计算，不应从 uniform 对齐值推导。</p>
+  <div class="callout">
+    <p><strong>两个不同层级的对齐：</strong></p>
+    <ul>
+      <li><strong>结构体 ABI（§2.2）</strong>——buffer 里「结构体的成员怎么排」，以反射和 contract test 为准。</li>
+      <li><strong>动态 uniform 偏移对齐（本节）</strong>——「绑定哪个 buffer 的哪个偏移」。</li>
+    </ul>
+    <p>两者都要满足，但属于不同的约束来源。</p>
+  </div>
+
+  <h3>2.7 设计 ABI-safe 结构体：清单</h3>
+  <ol>
+    <li>先从现有 shader、binding metadata、reflection 与 ABI contract 测试中确认目标布局，再定义 C++ 镜像。</li>
+    <li>跨语言矩阵统一使用 CPU row-major 字节、Slang 默认 <code>float4x4</code>，离线编译显式指定 <code>-matrix-layout-row-major</code>。</li>
+    <li>push-constant payload 不超过 L2 256 字节上限，且还要通过目标 backend 的实际 capability 与 pipeline-capacity gate。</li>
+    <li>用生成 reflection 和 <code>ShaderPipelineReflectionValidator</code> 校验布局；有矩阵字段时同时测试 SPIR-V decoration、非对称矩阵数值及 reflection size。</li>
+    <li>共享源码不自动证明 backend ABI 等价；新增目标必须有 contract 覆盖，不支持或无法证明时确定性失败。</li>
+  </ol>
+
+  <h2>示例与验证边界</h2>
+  <p>矩阵 layout 的具体断言位于 <code>tests/shader_tests.cpp</code> 与 shader contract tests：源码必须使用默认 <code>float4x4</code>，SPIR-V decoration 和非对称矩阵数值探针必须匹配，reflection push-constant size 必须与字段总和一致。单个示例编译成功不能替代这些契约测试，也不能证明所有 backend/platform 已验证。</p>
+
+  <h2>快速上手清单</h2>
+  <ol>
+    <li>用 Slang 写一个 <code>.slang</code> 模块，声明 entry point、uniform/cbuffer 与 <code>[[vk::push_constant]]</code> 结构体。</li>
+    <li>按实际 Slang/resource metadata 与反射 contract 定义 C++ 镜像；矩阵遵守本章 Matrix Layout 规则，push constant 不超过 L2 256 字节上限。</li>
+    <li>将源、entry point 和明确资源 metadata 接入 <code>scripts/compile_shaders.py</code> / CMake 构建目标，生成支持的字节码与 YAML reflection。</li>
+    <li>运行时用 <code>ShaderReflectionCache::loadFromFile()</code> 读反射，用 <code>ShaderPipelineReflectionValidator::validate()</code> 校验与本次 CPU payload 对应的管线布局；不得默认 <code>sizeof(CppStruct)</code> 就等于目标 reflection size。</li>
+    <li>录制时用 <code>pushConstants(stages, offset, sizeof(MyPush), &amp;data)</code> 推送；若尺寸/对齐不对，RHI 会在创建管线或录制期确定性报错。</li>
+  </ol>
+
+  <div class="pager">
+    <a href="08-network.html"><div class="dir">← 上一章</div><div class="ttl">08 网络</div></a>
+    <a href="10-prefab-internal-resources.html"><div class="dir">下一章 →</div><div class="ttl">10 预制体</div></a>
+    <a class="next" href="index.html"><div class="dir">回到 →</div><div class="ttl">总览</div></a>
+  </div>
+</main>
+</div>
+</body>
+</html>
